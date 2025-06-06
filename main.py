@@ -15,7 +15,7 @@ DB_CONFIG = {
     "port": os.getenv("PGPORT"),
 }
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = 1877127405
 
 IIKO_ORG_ID = os.getenv("ORG_ID")
