@@ -194,7 +194,7 @@ def format_stoplist_message(added_items, removed_items, existing_items):
     message += f"\n\n#стоплист\n\n✅ Синхронизация завершена. Добавлено: {len(added_items)}, удалено: {len(removed_items)}"
     return message
 
-def send_telegram_message(text: str):
+async def send_telegram_message(text: str):
     chat_ids = await get_all_chat_ids()
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     for chat_id in chat_ids:
