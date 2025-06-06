@@ -16,9 +16,19 @@ DB_CONFIG = {
 }
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = 1877127405
+#CHAT_ID = 1877127405
 
 IIKO_ORG_ID = os.getenv("ORG_ID")
+
+async def get_all_chat_ids():
+    try:
+        conn = await asyncpg.connect(**DB_CONFIG)
+        rows = await conn.fetch("SELECT chat_id FROM users WHERE chat_id IS NOT NULL;")
+        await conn.close()
+        return [row["chat_id"] for row in rows]
+    except Exception as e:
+        print(f"❌ Ошибка при получении chat_id пользователей: {e}")
+        return []
 
 
 async def fetch_token():
@@ -185,16 +195,19 @@ def format_stoplist_message(added_items, removed_items, existing_items):
     return message
 
 def send_telegram_message(text: str):
+    chat_ids = await get_all_chat_ids()
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text
-    }
-    try:
-        response = httpx.post(url, json=payload)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"❌ Ошибка при отправке в Telegram: {e}")
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text
+        }
+        try:
+            response = httpx.post(url, json=payload)
+            response.raise_for_status()
+            print(f"✅ Сообщение успешно отправлено chat_id={chat_id}")
+        except Exception as e:
+            print(f"❌ Ошибка при отправке в Telegram (chat_id={chat_id}): {e}")
 
 
 async def main():
@@ -229,7 +242,7 @@ async def main():
 
     # 📤 Отправим сообщение
     msg = format_stoplist_message(added_items, removed_items, existing_items)
-    send_telegram_message(msg)
+    await send_telegram_message(msg)
 
 if __name__ == "__main__":
     asyncio.run(main())
