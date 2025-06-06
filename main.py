@@ -173,25 +173,35 @@ def format_stoplist_message(added_items, removed_items, existing_items):
     message = "Новые блюда в стоп-листе 🚫"
     if added_items:
         for item in added_items:
-            message += f"\n▫️ {item['name']}"
+            message += f"\n▫️ {format_name(item)}"
     else:
         message += "\n▫️ —"
 
     message += "\n\nУдалены из стоп-листа ✅"
     if removed_items:
         for item in removed_items:
-            message += f"\n▫️ {item['name']}"
+            message += f"\n▫️ {format_name(item)}"
     else:
         message += "\n▫️ —"
 
     message += "\n\nОстались в стоп-листе"
     if existing_items:
         for item in existing_items:
-            message += f"\n▫️ {item['name']}"
+            message += f"\n▫️ {format_name(item)}"
     else:
         message += "\n▫️ —"
 
     message += f"\n\n#стоплист\n\n✅ Синхронизация завершена. Добавлено: {len(added_items)}, удалено: {len(removed_items)}"
+
+    if added_items:
+        print("➕ Добавлены в стоп-лист:")
+        for i in added_items:
+            print(f"• {format_name(i)}")
+    if removed_items:
+        print("➖ Удалены из стоп-листа:")
+        for i in removed_items:
+            print(f"• {format_name(i)}")
+
     return message
 
 async def send_telegram_message(text: str):
@@ -208,6 +218,12 @@ async def send_telegram_message(text: str):
             print(f"✅ Сообщение успешно отправлено chat_id={chat_id}")
         except Exception as e:
             print(f"❌ Ошибка при отправке в Telegram (chat_id={chat_id}): {e}")
+
+
+def format_name(item):
+    if "balance" in item and item["balance"] > 0:
+        return f"{item['name']} ({int(item['balance'])})"
+    return item["name"]
 
 
 async def main():
@@ -233,12 +249,30 @@ async def main():
     current_skus = {row["sku"]: row["name"] for row in current_rows}
     incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
 
-    added_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku not in current_skus]
-    removed_items = [{"sku": sku, "name": name} for sku, name in current_skus.items() if sku not in incoming_skus]
-    existing_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku in current_skus]
+
+
+    added_items = []
+    removed_items = []
+    existing_items = []
+
+    for sku, name in incoming_skus.items():
+        item = next(i for i in stoplist_items if i["sku"] == sku)
+        if sku not in current_skus:
+            added_items.append(item)
+        else:
+            existing_items.append(item)
+
+    for sku, name in current_skus.items():
+        if sku not in incoming_skus:
+            removed_items.append({"sku": sku, "name": name})
 
     # 💾 Обновим таблицу
     await sync_stoplist_with_db(stoplist_items)
+
+    # 🛑 Не отправлять ничего, если нет изменений
+    if not added_items and not removed_items:
+        print("ℹ️ Нет изменений в стоп-листе, сообщение не отправляется.")
+        return
 
     # 📤 Отправим сообщение
     msg = format_stoplist_message(added_items, removed_items, existing_items)
