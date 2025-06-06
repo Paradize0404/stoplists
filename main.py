@@ -116,29 +116,45 @@ async def sync_stoplist_with_db(stoplist_items):
         );
     """)
 
-    # Получение текущих SKU из таблицы
-    current_rows = await conn.fetch("SELECT sku FROM active_stoplist;")
-    current_skus = {row["sku"] for row in current_rows}
+    # Получение текущих SKU и названий из таблицы
+    current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
+    current_skus = {row["sku"]: row["name"] for row in current_rows}
 
     # SKU из API
-    incoming_skus = {item["sku"] for item in stoplist_items}
+    incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
 
-    # Новые для вставки
-    for item in stoplist_items:
-        if item["sku"] not in current_skus:
-            await conn.execute("""
-                INSERT INTO active_stoplist (sku, balance, name) VALUES ($1, $2, $3);
-            """, item["sku"], item["balance"], item["name"])
+    # Новые
+    new_items = [(sku, name) for sku, name in incoming_skus.items() if sku not in current_skus]
+    # Уже были
+    existing_items = [(sku, name) for sku, name in incoming_skus.items() if sku in current_skus]
+    # Удаляемые
+    to_delete = [sku for sku in current_skus if sku not in incoming_skus]
 
-    # Удалить те, что были, но теперь исчезли из API
-    to_delete = list(current_skus - incoming_skus)
+    # Вставка новых
+    for sku, name in new_items:
+        item = next(i for i in stoplist_items if i["sku"] == sku)
+        await conn.execute("""
+            INSERT INTO active_stoplist (sku, balance, name) VALUES ($1, $2, $3);
+        """, sku, item["balance"], name)
+
+    # Удаление исчезнувших
     if to_delete:
         await conn.execute("""
             DELETE FROM active_stoplist WHERE sku = ANY($1);
         """, to_delete)
 
     await conn.close()
-    print(f"✅ Синхронизация завершена. Добавлено: {len(incoming_skus - current_skus)}, удалено: {len(to_delete)}")
+
+    # 🧾 Логируем результат
+    print("\nНовые блюда в стоп-листе 🚫")
+    for _, name in new_items:
+        print(f"▫️ {name}")
+    print("\nУже в стоп-листе")
+    for _, name in existing_items:
+        print(f"▫️ {name}")
+    print("\n#стоплист")
+
+    print(f"\n✅ Синхронизация завершена. Добавлено: {len(new_items)}, удалено: {len(to_delete)}")
 
 
 
