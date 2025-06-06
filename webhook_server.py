@@ -4,6 +4,10 @@ from main import main  # Импортируем основную функцию
 
 app = FastAPI()
 
+@app.get("/")
+def index():
+    return {"status": "ok", "info": "Webhook listener is alive"}
+
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     data = await request.json()
