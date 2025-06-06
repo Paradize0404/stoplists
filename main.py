@@ -199,35 +199,37 @@ def send_telegram_message(text: str):
 
 async def main():
     token = await fetch_token()
-    if token:
-        print(f"✅ Актуальный токен: {token}")
-        terminal_group_ids = fetch_terminal_groups(token)
-        stoplist_items = fetch_stop_list_raw(token, terminal_group_ids)
-        mapped = await map_stoplist_with_db(DB_CONFIG, stoplist_items)
-        print("\n🧾 Сопоставленные стоп-позиции:")
-        for line in mapped:
-            print("•", line)
-        # Синхронизация и логика различий
-        await sync_stoplist_with_db(stoplist_items)
-
-        # Формируем списки для сообщения
-        conn = await asyncpg.connect(**DB_CONFIG)
-        current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
-        await conn.close()
-
-        # Списки
-        current_skus = {row["sku"]: row["name"] for row in current_rows}
-        incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
-
-        added_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku not in current_skus]
-        removed_items = [{"sku": sku, "name": name} for sku, name in current_skus.items() if sku not in incoming_skus]
-        existing_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku in current_skus]
-
-        # Формирование и отправка
-        msg = format_stoplist_message(added_items, removed_items, existing_items)
-        send_telegram_message(msg)
-    else:
+    if not token:
         print("❌ Токен не найден.")
+        return
+
+    print(f"✅ Актуальный токен: {token}")
+    terminal_group_ids = fetch_terminal_groups(token)
+    stoplist_items = fetch_stop_list_raw(token, terminal_group_ids)
+
+    # 🧾 Сопоставим с БД и выведем в консоль
+    mapped = await map_stoplist_with_db(DB_CONFIG, stoplist_items)
+    print("\n🧾 Сопоставленные стоп-позиции:")
+    for line in mapped:
+        print("•", line)
+
+    # 📥 Получаем текущее состояние до обновления
+    conn = await asyncpg.connect(**DB_CONFIG)
+    current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
+    await conn.close()
+    current_skus = {row["sku"]: row["name"] for row in current_rows}
+    incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
+
+    added_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku not in current_skus]
+    removed_items = [{"sku": sku, "name": name} for sku, name in current_skus.items() if sku not in incoming_skus]
+    existing_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku in current_skus]
+
+    # 💾 Обновим таблицу
+    await sync_stoplist_with_db(stoplist_items)
+
+    # 📤 Отправим сообщение
+    msg = format_stoplist_message(added_items, removed_items, existing_items)
+    send_telegram_message(msg)
 
 if __name__ == "__main__":
     asyncio.run(main())
