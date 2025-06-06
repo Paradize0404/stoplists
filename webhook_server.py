@@ -1,3 +1,5 @@
+
+import json
 from fastapi import FastAPI, Request
 import asyncio
 from main import main  # Импортируем основную функцию
