@@ -15,6 +15,9 @@ DB_CONFIG = {
     "port": os.getenv("PGPORT"),
 }
 
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = 1877127405
+
 IIKO_ORG_ID = os.getenv("ORG_ID")
 
 
@@ -156,6 +159,41 @@ async def sync_stoplist_with_db(stoplist_items):
 
     print(f"\n✅ Синхронизация завершена. Добавлено: {len(new_items)}, удалено: {len(to_delete)}")
 
+def format_stoplist_message(added_items, removed_items, existing_items):
+    message = "Новые блюда в стоп-листе 🚫"
+    if added_items:
+        for item in added_items:
+            message += f"\n▫️ {item['name']}"
+    else:
+        message += "\n▫️ —"
+
+    message += "\n\nУдалены из стоп-листа ✅"
+    if removed_items:
+        for item in removed_items:
+            message += f"\n▫️ {item['name']}"
+    else:
+        message += "\n▫️ —"
+
+    message += "\n\nОстались в стоп-листе"
+    if existing_items:
+        for item in existing_items:
+            message += f"\n▫️ {item['name']}"
+    else:
+        message += "\n▫️ —"
+
+    message += f"\n\n#стоплист\n\n✅ Синхронизация завершена. Добавлено: {len(added_items)}, удалено: {len(removed_items)}"
+
+def send_telegram_message(text: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text
+    }
+    try:
+        response = httpx.post(url, json=payload)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"❌ Ошибка при отправке в Telegram: {e}")
 
 
 async def main():
@@ -168,7 +206,25 @@ async def main():
         print("\n🧾 Сопоставленные стоп-позиции:")
         for line in mapped:
             print("•", line)
-        await sync_stoplist_with_db(stoplist_items)  # ← Добавлено сюда
+        # Синхронизация и логика различий
+        await sync_stoplist_with_db(stoplist_items)
+
+        # Формируем списки для сообщения
+        conn = await asyncpg.connect(**DB_CONFIG)
+        current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
+        await conn.close()
+
+        # Списки
+        current_skus = {row["sku"]: row["name"] for row in current_rows}
+        incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
+
+        added_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku not in current_skus]
+        removed_items = [{"sku": sku, "name": name} for sku, name in current_skus.items() if sku not in incoming_skus]
+        existing_items = [{"sku": sku, "name": name} for sku, name in incoming_skus.items() if sku in current_skus]
+
+        # Формирование и отправка
+        msg = format_stoplist_message(added_items, removed_items, existing_items)
+        send_telegram_message(msg)
     else:
         print("❌ Токен не найден.")
 
