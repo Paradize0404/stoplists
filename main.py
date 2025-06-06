@@ -23,9 +23,9 @@ IIKO_ORG_ID = os.getenv("ORG_ID")
 async def get_all_chat_ids():
     try:
         conn = await asyncpg.connect(**DB_CONFIG)
-        rows = await conn.fetch("SELECT chat_id FROM users WHERE chat_id IS NOT NULL;")
+        rows = await conn.fetch("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL")
         await conn.close()
-        return [row["chat_id"] for row in rows]
+        return [row["telegram_id"] for row in rows]
     except Exception as e:
         print(f"❌ Ошибка при получении chat_id пользователей: {e}")
         return []
