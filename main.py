@@ -182,6 +182,7 @@ def format_stoplist_message(added_items, removed_items, existing_items):
         message += "\n▫️ —"
 
     message += f"\n\n#стоплист\n\n✅ Синхронизация завершена. Добавлено: {len(added_items)}, удалено: {len(removed_items)}"
+    return message
 
 def send_telegram_message(text: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
