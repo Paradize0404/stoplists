@@ -97,22 +97,22 @@ def fetch_stop_list_raw(token, terminal_group_ids):
 async def map_stoplist_with_db(db_config, stoplist_items):
     conn = await asyncpg.connect(**db_config)
 
-    # Собираем список всех sku из стоп-листа
-    skus = [item["sku"] for item in stoplist_items]
-    query = "SELECT code, name FROM nomenclature WHERE code = ANY($1)"
-    rows = await conn.fetch(query, skus)
+    # Собираем список всех productId из стоп-листа
+    product_ids = [item["productId"] for item in stoplist_items]
+    query = "SELECT id, name FROM nomenclature WHERE id = ANY($1)"
+    rows = await conn.fetch(query, product_ids)
 
     await conn.close()
 
-    # Словарь: sku → name
-    sku_name_map = {row["code"]: row["name"] for row in rows}
+    # Словарь: id → name
+    id_name_map = {str(row["id"]): row["name"] for row in rows}
 
     # Формируем результат
     result = []
     for item in stoplist_items:
-        name = sku_name_map.get(item["sku"], "[НЕ НАЙДЕНО В БД]")
-        item["name"] = name  # ← Вот это важно!
-        result.append(f"{name} | SKU: {item['sku']} | Остаток: {item['balance']}")
+        name = id_name_map.get(item["productId"], "[НЕ НАЙДЕНО В БД]")
+        item["name"] = name
+        result.append(f"{name} | ID: {item['productId']} | Остаток: {item['balance']}")
     
     return result
 
