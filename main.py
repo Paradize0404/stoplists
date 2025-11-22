@@ -1,312 +1,335 @@
 import os
-import logging
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-import httpx
-import asyncpg
 import asyncio
-
+import asyncpg
+import httpx
+import requests
+from dotenv import load_dotenv
+import logging
+import threading
+import time
+from datetime import datetime, timedelta
 from daily_report import send_daily_report
 
-# ----------------------------------------------------------
-#   НАСТРОЙКИ
-# ----------------------------------------------------------
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-STOPLIST_CHAT_IDS = os.getenv("STOPLIST_CHAT_IDS", "").split(",")
-
-IIKO_API_LOGIN = os.getenv("IIKO_API_LOGIN")
-IIKO_ORG_ID = os.getenv("IIKO_ORG_ID")
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-KLG = ZoneInfo("Europe/Kaliningrad")
+load_dotenv()
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    level=logging.DEBUG,                      # показывает всё: DEBUG, INFO, WARNING, ERROR
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("stoplist.log", encoding="utf-8"),
+        logging.StreamHandler()               # вывод в консоль (можно убрать, если не нужно)
+    ]
 )
 
-# ----------------------------------------------------------
-#   БАЗА ДАННЫХ
-# ----------------------------------------------------------
+DB_CONFIG = {
+    "user": os.getenv("PGUSER"),
+    "password": os.getenv("PGPASSWORD"),
+    "database": os.getenv("PGDATABASE"),
+    "host": os.getenv("PGHOST"),
+    "port": os.getenv("PGPORT"),
+}
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+IIKO_ORG_ID = os.getenv("ORG_ID")
+
+
+# ====================== БАЗА ======================
 
 async def db():
-    return await asyncpg.connect(DATABASE_URL)
+    return await asyncpg.connect(**DB_CONFIG)
 
 
-async def ensure_tables():
+async def init_tables():
     conn = await db()
 
     await conn.execute("""
-    CREATE TABLE IF NOT EXISTS stoplist_messages (
-        id SERIAL PRIMARY KEY,
-        chat_id BIGINT NOT NULL,
-        message_id BIGINT NOT NULL,
-        created_at TIMESTAMP NOT NULL
-    );
+        CREATE TABLE IF NOT EXISTS active_stoplist (
+            sku TEXT PRIMARY KEY,
+            balance REAL,
+            name TEXT
+        );
     """)
 
     await conn.execute("""
-    CREATE TABLE IF NOT EXISTS stoplist_log (
-        id SERIAL PRIMARY KEY,
-        product_id TEXT NOT NULL,
-        product_name TEXT NOT NULL,
-        started_at TIMESTAMP NOT NULL,
-        ended_at TIMESTAMP
-    );
+        CREATE TABLE IF NOT EXISTS stoplist_message (
+            chat_id BIGINT PRIMARY KEY,
+            message_id BIGINT
+        );
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS stoplist_history (
+            id SERIAL PRIMARY KEY,
+            sku TEXT,
+            name TEXT,
+            started_at TIMESTAMP,
+            ended_at TIMESTAMP,
+            duration_seconds INT,
+            date DATE
+        );
     """)
 
     await conn.close()
 
-# ----------------------------------------------------------
-#   TELEGRAM
-# ----------------------------------------------------------
 
-async def tg_send(chat_id, text):
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": int(chat_id),
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }
-        )
+async def get_all_chat_ids():
+    conn = await db()
+    rows = await conn.fetch("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL")
+    await conn.close()
+    return [row["telegram_id"] for row in rows]
+
+
+# ====================== IIKO ======================
+
+async def fetch_token():
+    conn = await db()
+    row = await conn.fetchrow("SELECT token FROM iiko_access_tokens ORDER BY created_at DESC LIMIT 1")
+    await conn.close()
+    return row["token"] if row else None
+
+
+def fetch_terminal_groups(token):
+    url = "https://api-ru.iiko.services/api/1/terminal_groups"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"organizationIds": [IIKO_ORG_ID]}
+
+    r = requests.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    data = r.json()
+
+    return [g["id"] for g in data["terminalGroups"][0]["items"]]
+
+
+def fetch_stoplist_raw(token, terminal_group_ids):
+    url = "https://api-ru.iiko.services/api/1/stop_lists"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"organizationIds": [IIKO_ORG_ID], "terminalGroupIds": terminal_group_ids}
+
+    r = requests.post(url, json=payload, headers=headers)
+    if r.status_code != 200:
+        return []
+
+    try:
         data = r.json()
-        if not data.get("ok"):
-            logging.error(f"Ошибка Telegram: {data}")
-        return data
+        return data["terminalGroupStopLists"][0]["items"][0]["items"]
+    except:
+        return []
 
-
-async def tg_delete(chat_id, message_id):
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
-            json={"chat_id": int(chat_id), "message_id": int(message_id)}
-        )
-
-
-# ----------------------------------------------------------
-#   IIKO AUTH
-# ----------------------------------------------------------
-
-async def iiko_token():
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(
-            "https://api-ru.iiko.services/api/1/access_token",
-            json={"apiLogin": IIKO_API_LOGIN}
-        )
-
-        data = r.json()
-        if "token" not in data:
-            logging.error(f"Ошибка получения токена IIKO: {data}")
-            raise Exception(f"IIKO token error: {data}")
-
-        return data["token"]
-
-
-# ----------------------------------------------------------
-#   ЗАПРОС СТОП-ЛИСТА
-# ----------------------------------------------------------
-
-async def fetch_stoplist(token):
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(
-            "https://api-ru.iiko.services/api/1/stop_lists",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"organizationId": IIKO_ORG_ID}
-        )
-        return r.json()
-
-# ----------------------------------------------------------
-#   ПОЛУЧЕНИЕ ПОСЛЕДНЕГО СООБЩЕНИЯ СТОП-ЛИСТА
-# ----------------------------------------------------------
-
-async def get_last_message(chat_id):
-    conn = await db()
-    row = await conn.fetchrow(
-        """
-        SELECT message_id
-        FROM stoplist_messages
-        WHERE chat_id=$1
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        int(chat_id)
-    )
-    await conn.close()
-    return row["message_id"] if row else None
-
-
-async def save_message(chat_id, msg_id):
-    conn = await db()
-    await conn.execute(
-        """
-        INSERT INTO stoplist_messages (chat_id, message_id, created_at)
-        VALUES ($1, $2, $3)
-        """,
-        int(chat_id),
-        int(msg_id),
-        datetime.now(KLG)
-    )
-    await conn.close()
-
-
-# ----------------------------------------------------------
-#   ОТРИСОВКА СТОП-ЛИСТА
-# ----------------------------------------------------------
-
-def render_stoplist(items):
-    if not items:
-        return "✔️ <b>Стоп-лист пуст</b>"
-
-    text = "🚫 <b>СТОП-ЛИСТ</b>\n\n"
-    for p in items:
-        name = p.get("name")
-        bal = p.get("balance", 0)
-        text += f"• <b>{name}</b> — {bal}\n"
-    return text
-
-
-# ----------------------------------------------------------
-#   ОБНОВЛЕНИЕ СООБЩЕНИЯ СТОП-ЛИСТА (удаляем старое → отправляем новое)
-# ----------------------------------------------------------
-
-async def update_stoplist_message(stop_items):
-    text = render_stoplist(stop_items)
-
-    for chat in STOPLIST_CHAT_IDS:
-        if not chat.strip():
-            continue
-
-        last = await get_last_message(chat)
-
-        # удалить старое
-        if last:
-            try:
-                await tg_delete(chat, last)
-            except Exception as e:
-                logging.error(f"Не удалось удалить старое сообщение: {e}")
-
-        # отправить новое
-        msg = await tg_send(chat, text)
-        if msg.get("ok"):
-            await save_message(chat, msg["result"]["message_id"])
-
-
-# ----------------------------------------------------------
-#   СИНХРОНИЗАЦИЯ СТОП-ЛИСТА С БАЗОЙ ДАННЫХ
-# ----------------------------------------------------------
-
-async def sync_stoplist(token):
-    data = await fetch_stoplist(token)
-
-    # собираем список товаров с балансом 0
-    stop_items = []
-    for tg in data.get("terminalGroups", []):
-        for item in tg.get("items", []):
-            if item["balance"] == 0:
-                stop_items.append(item)
-
-    now = datetime.now(KLG)
-
-    conn = await db()
-
-    # ------------------------------------------------------
-    # Открываем новые стопы
-    # ------------------------------------------------------
-
-    for p in stop_items:
-        pid = p["productId"]
-        pname = p["name"]
-
-        exists = await conn.fetchrow(
-            """
-            SELECT 1 FROM stoplist_log
-            WHERE product_id=$1 AND ended_at IS NULL
-            """,
-            pid
-        )
-
-        if not exists:
-            await conn.execute(
-                """
-                INSERT INTO stoplist_log (product_id, product_name, started_at)
-                VALUES ($1, $2, $3)
-                """,
-                pid,
-                pname,
-                now
-            )
-
-    # ------------------------------------------------------
-    # Закрываем те, которых больше нет в стопе
-    # ------------------------------------------------------
-
-    active_ids = {p["productId"] for p in stop_items}
-
-    open_rows = await conn.fetch(
-        "SELECT * FROM stoplist_log WHERE ended_at IS NULL"
-    )
-
-    for row in open_rows:
-        if row["product_id"] not in active_ids:
-            await conn.execute(
-                "UPDATE stoplist_log SET ended_at=$1 WHERE id=$2",
-                now,
-                row["id"]
-            )
-
-    await conn.close()
-
-    # ------------------------------------------------------
-    # Обновляем сообщение стоп-листа
-    # ------------------------------------------------------
-
-    await update_stoplist_message(stop_items)
-
-# ----------------------------------------------------------
-#   SCHEDULER — ежедневный отчёт в 21:00 (Калининград)
-# ----------------------------------------------------------
-
-async def scheduler():
+def run_daily_scheduler():
+    """Фоновый бесконечный цикл, который ждёт 22:00 Калининграда и шлёт отчёт."""
     while True:
-        now = datetime.now(KLG)
-        target = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        now = datetime.now()
 
-        # если время уже прошло — перенос на завтра
-        if now > target:
+        # Следующая отправка: сегодня в 22:00 или завтра в 22:00
+        target = now.replace(hour=22, minute=0, second=0, microsecond=0)
+        if now >= target:
             target += timedelta(days=1)
 
         wait_seconds = (target - now).total_seconds()
-        logging.info(f"⏳ Следующий ежедневный отчёт запланирован на {target}")
+        logging.info(f"⏳ Жду до следующей отправки отчёта: {wait_seconds} сек")
 
-        await asyncio.sleep(wait_seconds)
+        time.sleep(wait_seconds)
 
         try:
-            logging.info("📤 Отправляю ежедневный отчёт...")
-            await send_daily_report()
+            logging.info("📤 Авто-отправка вечернего отчёта...")
+            send_daily_report()
         except Exception as e:
-            logging.error(f"Ошибка при отправке ежедневного отчёта: {e}")
+            logging.error(f"Ошибка при авто-отправке отчёта: {e}")
 
 
-# ----------------------------------------------------------
-#   MAIN
-# ----------------------------------------------------------
+async def map_names(items):
+    conn = await db()
+
+    product_ids = [i["productId"] for i in items]
+    rows = await conn.fetch("""
+        SELECT id, name FROM nomenclature WHERE id = ANY($1)
+    """, product_ids)
+    await conn.close()
+
+    id2name = {str(r["id"]): r["name"] for r in rows}
+
+    for item in items:
+        item["name"] = id2name.get(item["productId"], "[НЕ НАЙДЕНО]")
+        item["sku"] = item["productId"]  # создаём SKU как productId
+
+    return items
+
+
+# ====================== ИСТОРИЯ ======================
+
+async def update_history(old_state, new_state):
+    conn = await db()
+
+    old_zero = {sku for sku, v in old_state.items() if v["balance"] == 0}
+    new_zero = {sku for sku, v in new_state.items() if v["balance"] == 0}
+
+    # вошли в стоп
+    for sku in new_zero - old_zero:
+        item = new_state[sku]
+        await conn.execute("""
+            INSERT INTO stoplist_history (sku, name, started_at, date)
+            VALUES ($1, $2, NOW(), CURRENT_DATE)
+        """, sku, item["name"])
+
+    # вышли из стопа
+    for sku in old_zero - new_zero:
+        await conn.execute("""
+            UPDATE stoplist_history
+            SET ended_at = NOW(),
+                duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
+            WHERE sku=$1 AND ended_at IS NULL
+        """, sku)
+
+    await conn.close()
+
+
+# ====================== DIFF ======================
+
+def format_name(item):
+    if item["balance"] > 0:
+        return f"{item['name']} ({int(item['balance'])})"
+    return f"{item['name']} — стоп"
+
+
+def format_stoplist_message(added, removed, existing):
+    msg = "Новые блюда в стоп-листе 🚫"
+    msg += "\n" + "\n".join("▫️ " + format_name(i) for i in added) if added else "\n▫️ —"
+
+    msg += "\n\nУдалены из стоп-листа ✅"
+    msg += "\n" + "\n".join("▫️ " + i["name"] for i in removed) if removed else "\n▫️ —"
+
+    msg += "\n\nОстались в стоп-листе"
+    msg += "\n" + "\n".join("▫️ " + format_name(i) for i in existing) if existing else "\n▫️ —"
+
+    return msg + "\n\n#стоплист"
+
+
+async def sync_and_diff(stop_items):
+    conn = await db()
+
+    rows = await conn.fetch("SELECT sku, balance, name FROM active_stoplist")
+    old = {r["sku"]: {"balance": r["balance"], "name": r["name"]} for r in rows}
+
+    new = {i["sku"]: {"balance": i["balance"], "name": i["name"]} for i in stop_items}
+
+    # Изменение: учитываем не только появление/удаление, но и изменение баланса
+    added = []
+    removed = []
+    existing = []
+
+    for sku in new:
+        if sku not in old:
+            # новое блюдо в стопе
+            added.append(dict(sku=sku, **new[sku]))
+        else:
+            # блюдо было — проверяем изменение баланса
+            old_balance = float(old[sku]["balance"])
+            new_balance = float(new[sku]["balance"])
+
+            if old_balance != new_balance:
+                added.append(dict(sku=sku, **new[sku]))  # считаем как "добавленное изменение"
+            else:
+                existing.append(dict(sku=sku, **new[sku]))
+
+    for sku in old:
+        if sku not in new:
+            removed.append(dict(sku=sku, **old[sku]))
+
+    await update_history(old, new)
+
+    await conn.execute("DELETE FROM active_stoplist")
+    for sku, data in new.items():
+        await conn.execute("""
+            INSERT INTO active_stoplist (sku, balance, name)
+            VALUES ($1, $2, $3)
+        """, sku, data["balance"], data["name"])
+
+    await conn.close()
+
+    return added, removed, existing
+
+
+# ====================== TELEGRAM ======================
+
+async def update_stoplist_message(text):
+    chat_ids = await get_all_chat_ids()
+    if not chat_ids:
+        return
+
+    conn = await db()
+
+    for chat_id in chat_ids:
+        row = await conn.fetchrow("SELECT message_id FROM stoplist_message WHERE chat_id=$1", chat_id)
+
+        if row:
+            try:
+                httpx.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": row["message_id"]}
+                )
+            except:
+                pass
+
+        r = httpx.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text}
+        )
+
+        data = r.json()
+
+        # Если бот НЕ может отправить сообщение (403, 400, invalid chat, block и т.д.)
+        if not data.get("ok"):
+            logging.error(f"Ошибка Telegram при отправке в chat_id={chat_id}: {data}")
+            continue
+
+        msg_id = data["result"]["message_id"]
+
+        await conn.execute("""
+            INSERT INTO stoplist_message (chat_id, message_id)
+            VALUES ($1, $2)
+            ON CONFLICT (chat_id) DO UPDATE SET message_id = EXCLUDED.message_id
+        """, chat_id, msg_id)
+
+    await conn.close()
+
+
+# ====================== MAIN ======================
 
 async def main():
-    logging.info("🔧 Инициализация таблиц...")
-    await ensure_tables()
+    await init_tables()
 
-    # запускаем ежедневный планировщик
-    asyncio.create_task(scheduler())
+    token = await fetch_token()
+    if not token:
+        print("❌ Нет токена iiko")
+        return
 
-    # отправляем отчёт при деплое — разово
-    asyncio.create_task(send_daily_report())
+    tg_ids = fetch_terminal_groups(token)
+    raw = fetch_stoplist_raw(token, tg_ids)
+    raw = await map_names(raw)
 
-    # ничего не запускаем в цикле — webhook сам вызывает sync_stoplist()
+    added, removed, existing = await sync_and_diff(raw)
+
+    if not added and not removed:
+        print("ℹ️ Нет изменений")
+        return
+
+    text = format_stoplist_message(added, removed, existing)
+    await update_stoplist_message(text)
+
+# -------------------------
+#   ДОБАВЬ внизу, перед uvicorn.run()
+# -------------------------
+
+# 1. Отправка отчёта при деплое (проверка)
+try:
+    logging.info("🚀 Отправляю тестовый отчёт при деплое...")
+    asyncio.run(send_daily_report())
+except Exception as e:
+    logging.error(f"Ошибка при отправке отчёта на деплое: {e}")
+
+# 2. Запуск фонового планировщика
+threading.Thread(target=run_daily_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":
