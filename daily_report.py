@@ -44,9 +44,11 @@ async def fetch_daily_stats():
     now_klg = datetime.now(KLG)
     target_day = (now_klg - timedelta(days=1)).date()
 
-    day_start = datetime.combine(target_day, time(8, 0), tzinfo=KLG)
-    day_end   = datetime.combine(target_day, time(21, 0), tzinfo=KLG)
-
+    day_start = datetime.combine(target_day, time(8, 0))
+    day_end   = datetime.combine(target_day, time(21, 0))
+       
+    day_start_aware = day_start.replace(tzinfo=KLG)
+    day_end_aware   = day_end.replace(tzinfo=KLG)
     conn = await db()
 
     # тянем ВСЕ записи, которые пересекли период
@@ -75,6 +77,10 @@ async def fetch_daily_stats():
             s = s.replace(tzinfo=KLG)
         else:
             s = s.astimezone(KLG)
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=KLG)
+        else:
+            s = s.astimezone(KLG)
         e = row["ended_at"]
         if e:
             if e.tzinfo is None:
@@ -88,8 +94,8 @@ async def fetch_daily_stats():
                 e = day_end
 
         # пересечение с окном
-        seg_start = max(s, day_start)
-        seg_end   = min(e, day_end)
+        seg_start = max(s, day_start_aware)
+        seg_end   = min(e, day_end_aware)
 
         duration = (seg_end - seg_start).total_seconds()
 
