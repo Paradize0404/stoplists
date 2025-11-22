@@ -4,8 +4,17 @@ import asyncpg
 import httpx
 import requests
 from dotenv import load_dotenv
-
+import logging
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.DEBUG,                      # показывает всё: DEBUG, INFO, WARNING, ERROR
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("stoplist.log", encoding="utf-8"),
+        logging.StreamHandler()               # вывод в консоль (можно убрать, если не нужно)
+    ]
+)
 
 DB_CONFIG = {
     "user": os.getenv("PGUSER"),
