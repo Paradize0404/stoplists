@@ -100,6 +100,11 @@ async def main():
     report = build_report(rows)
     await send_report(report)
 
+async def send_daily_report():
+    rows = await fetch_daily_stats()
+    report = build_report(rows)
+    await send_report(report)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
