@@ -70,10 +70,17 @@ async def fetch_daily_stats():
         sku = row["sku"]
         name = row["name"]
 
-        s = row["started_at"].astimezone(KLG)
+        s = row["started_at"]
+        if s.tzinfo is None:
+            s = s.replace(tzinfo=KLG)
+        else:
+            s = s.astimezone(KLG)
         e = row["ended_at"]
         if e:
-            e = e.astimezone(KLG)
+            if e.tzinfo is None:
+                e = e.replace(tzinfo=KLG)
+            else:
+                e = e.astimezone(KLG)
         else:
             # стоп продолжается — обрезаем по day_end
             e = now_klg
