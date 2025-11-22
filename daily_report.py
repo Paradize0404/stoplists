@@ -23,6 +23,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # сюда впишешь Telegram ID, кому нужен отчёт
 REPORT_RECIPIENTS = [
     1877127405,
+    1059714785,
+    1078562089
 ]
 
 

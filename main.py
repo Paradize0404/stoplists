@@ -98,7 +98,13 @@ async def iiko_token():
             "https://api-ru.iiko.services/api/1/access_token",
             json={"apiLogin": IIKO_API_LOGIN}
         )
-        return r.json()["token"]
+
+        data = r.json()
+        if "token" not in data:
+            logging.error(f"Ошибка получения токена IIKO: {data}")
+            raise Exception(f"IIKO token error: {data}")
+
+        return data["token"]
 
 
 # ----------------------------------------------------------
