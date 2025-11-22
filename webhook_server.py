@@ -3,12 +3,17 @@ import json
 from fastapi import FastAPI, Request
 import asyncio
 from main import main  # Импортируем основную функцию
-
+from daily_report import main as send_daily_report
 app = FastAPI()
 
 @app.get("/")
 def index():
     return {"status": "ok", "info": "Webhook listener is alive"}
+
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 Startup: отправляю ежедневный отчёт (тестовый запуск после деплоя)")
+    asyncio.create_task(send_daily_report())
 
 
 @app.post("/webhook")

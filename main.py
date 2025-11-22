@@ -5,6 +5,12 @@ import httpx
 import requests
 from dotenv import load_dotenv
 import logging
+import threading
+import time
+from datetime import datetime, timedelta
+from daily_report import send_daily_report
+
+
 load_dotenv()
 
 logging.basicConfig(
@@ -109,6 +115,27 @@ def fetch_stoplist_raw(token, terminal_group_ids):
         return data["terminalGroupStopLists"][0]["items"][0]["items"]
     except:
         return []
+
+def run_daily_scheduler():
+    """Фоновый бесконечный цикл, который ждёт 22:00 Калининграда и шлёт отчёт."""
+    while True:
+        now = datetime.now()
+
+        # Следующая отправка: сегодня в 22:00 или завтра в 22:00
+        target = now.replace(hour=22, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+
+        wait_seconds = (target - now).total_seconds()
+        logging.info(f"⏳ Жду до следующей отправки отчёта: {wait_seconds} сек")
+
+        time.sleep(wait_seconds)
+
+        try:
+            logging.info("📤 Авто-отправка вечернего отчёта...")
+            send_daily_report()
+        except Exception as e:
+            logging.error(f"Ошибка при авто-отправке отчёта: {e}")
 
 
 async def map_names(items):
@@ -289,6 +316,20 @@ async def main():
 
     text = format_stoplist_message(added, removed, existing)
     await update_stoplist_message(text)
+
+# -------------------------
+#   ДОБАВЬ внизу, перед uvicorn.run()
+# -------------------------
+
+# 1. Отправка отчёта при деплое (проверка)
+try:
+    logging.info("🚀 Отправляю тестовый отчёт при деплое...")
+    send_daily_report()
+except Exception as e:
+    logging.error(f"Ошибка при отправке отчёта на деплое: {e}")
+
+# 2. Запуск фонового планировщика
+threading.Thread(target=run_daily_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":
