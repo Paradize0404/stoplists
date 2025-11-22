@@ -2,9 +2,9 @@ import os
 import asyncio
 import asyncpg
 import httpx
+import requests
 from dotenv import load_dotenv
 
-import requests
 load_dotenv()
 
 DB_CONFIG = {
@@ -16,110 +16,17 @@ DB_CONFIG = {
 }
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-#CHAT_ID = 1877127405
-
 IIKO_ORG_ID = os.getenv("ORG_ID")
 
-async def get_all_chat_ids():
-    try:
-        conn = await asyncpg.connect(**DB_CONFIG)
-        rows = await conn.fetch("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL")
-        await conn.close()
-        return [row["telegram_id"] for row in rows]
-    except Exception as e:
-        print(f"❌ Ошибка при получении chat_id пользователей: {e}")
-        return []
+
+# ====================== БАЗА ======================
+
+async def db():
+    return await asyncpg.connect(**DB_CONFIG)
 
 
-async def fetch_token():
-    try:
-        conn = await asyncpg.connect(**DB_CONFIG)
-        row = await conn.fetchrow("SELECT token FROM iiko_access_tokens ORDER BY created_at DESC LIMIT 1")
-        await conn.close()
-        return row["token"] if row else None
-    except Exception as e:
-        print(f"❌ Ошибка подключения к базе или получения токена: {e}")
-        return None
-
-def fetch_terminal_groups(token):
-    url = "https://api-ru.iiko.services/api/1/terminal_groups"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    json_data = {
-        "organizationIds": [IIKO_ORG_ID]
-    }
-
-    response = requests.post(url, headers=headers, json=json_data)
-    response.raise_for_status()
-
-    data = response.json()
-
-    try:
-        items = data["terminalGroups"][0]["items"]
-        for item in items:
-            print(f"📟 Терминальная группа: {item['name']} | ID: {item['id']}")
-        return [item["id"] for item in items]
-    except Exception as e:
-        print(f"❌ Ошибка извлечения ID терминальных групп: {e}")
-        return []
-
-
-
-def fetch_stop_list_raw(token, terminal_group_ids):
-    url = "https://api-ru.iiko.services/api/1/stop_lists"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    json_data = {
-        "organizationIds": [IIKO_ORG_ID],
-        "terminalGroupIds": terminal_group_ids  # ← исправлено: terminalGroupIds, не terminalGroupsIds
-    }
-
-    response = requests.post(url, headers=headers, json=json_data)
-    print(f"\n📡 Ответ от stopLists:\n{response.status_code}\n{response.text}")
-
-    if response.status_code == 200:
-        try:
-            data = response.json()
-            # Достаём стоп-лист всех терминальных групп
-            items = data["terminalGroupStopLists"][0]["items"][0]["items"]
-            return items
-        except Exception as e:
-            print(f"❌ Ошибка при парсинге стоп-листа: {e}")
-            return []
-    else:
-        print("❌ Запрос стоп-листа не удался.")
-        return []
-
-async def map_stoplist_with_db(db_config, stoplist_items):
-    conn = await asyncpg.connect(**db_config)
-
-    # Собираем список всех productId из стоп-листа
-    product_ids = [item["productId"] for item in stoplist_items]
-    query = "SELECT id, name FROM nomenclature WHERE id = ANY($1)"
-    rows = await conn.fetch(query, product_ids)
-
-    await conn.close()
-
-    # Словарь: id → name
-    id_name_map = {str(row["id"]): row["name"] for row in rows}
-
-    # Формируем результат
-    result = []
-    for item in stoplist_items:
-        name = id_name_map.get(item["productId"], "[НЕ НАЙДЕНО В БД]")
-        item["name"] = name
-        result.append(f"{name} | ID: {item['productId']} | Остаток: {item['balance']}")
-    
-    return result
-
-
-
-async def sync_stoplist_with_db(stoplist_items):
-    conn = await asyncpg.connect(**DB_CONFIG)
+async def init_tables():
+    conn = await db()
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS active_stoplist (
@@ -129,155 +36,225 @@ async def sync_stoplist_with_db(stoplist_items):
         );
     """)
 
-    # Получение текущих SKU и названий из таблицы
-    current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
-    current_skus = {row["sku"]: row["name"] for row in current_rows}
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS stoplist_message (
+            chat_id BIGINT PRIMARY KEY,
+            message_id BIGINT
+        );
+    """)
 
-    # SKU из API
-    incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
-
-    # Новые
-    new_items = [(sku, name) for sku, name in incoming_skus.items() if sku not in current_skus]
-    # Уже были
-    existing_items = [(sku, name) for sku, name in incoming_skus.items() if sku in current_skus]
-    # Удаляемые
-    to_delete = [sku for sku in current_skus if sku not in incoming_skus]
-
-    # Вставка новых
-    for sku, name in new_items:
-        item = next(i for i in stoplist_items if i["sku"] == sku)
-        await conn.execute("""
-            INSERT INTO active_stoplist (sku, balance, name) VALUES ($1, $2, $3);
-        """, sku, item["balance"], name)
-
-    # Удаление исчезнувших
-    if to_delete:
-        await conn.execute("""
-            DELETE FROM active_stoplist WHERE sku = ANY($1);
-        """, to_delete)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS stoplist_history (
+            id SERIAL PRIMARY KEY,
+            sku TEXT,
+            name TEXT,
+            started_at TIMESTAMP,
+            ended_at TIMESTAMP,
+            duration_seconds INT,
+            date DATE
+        );
+    """)
 
     await conn.close()
 
-    # 🧾 Логируем результат
-    print("\nНовые блюда в стоп-листе 🚫")
-    for _, name in new_items:
-        print(f"▫️ {name}")
-    print("\nУже в стоп-листе")
-    for _, name in existing_items:
-        print(f"▫️ {name}")
-    print("\n#стоплист")
 
-    print(f"\n✅ Синхронизация завершена. Добавлено: {len(new_items)}, удалено: {len(to_delete)}")
+async def get_all_chat_ids():
+    conn = await db()
+    rows = await conn.fetch("SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL")
+    await conn.close()
+    return [row["telegram_id"] for row in rows]
 
-def format_stoplist_message(added_items, removed_items, existing_items):
-    message = "Новые блюда в стоп-листе 🚫"
-    if added_items:
-        for item in added_items:
-            message += f"\n▫️ {format_name(item)}"
-    else:
-        message += "\n▫️ —"
 
-    message += "\n\nУдалены из стоп-листа ✅"
-    if removed_items:
-        for item in removed_items:
-            message += f"\n▫️ {format_name(item)}"
-    else:
-        message += "\n▫️ —"
+# ====================== IIKO ======================
 
-    message += "\n\nОстались в стоп-листе"
-    if existing_items:
-        for item in existing_items:
-            message += f"\n▫️ {format_name(item)}"
-    else:
-        message += "\n▫️ —"
+async def fetch_token():
+    conn = await db()
+    row = await conn.fetchrow("SELECT token FROM iiko_access_tokens ORDER BY created_at DESC LIMIT 1")
+    await conn.close()
+    return row["token"] if row else None
 
-    message += f"\n\n#стоплист\n\n✅ Синхронизация завершена. Добавлено: {len(added_items)}, удалено: {len(removed_items)}"
 
-    if added_items:
-        print("➕ Добавлены в стоп-лист:")
-        for i in added_items:
-            print(f"• {format_name(i)}")
-    if removed_items:
-        print("➖ Удалены из стоп-листа:")
-        for i in removed_items:
-            print(f"• {format_name(i)}")
+def fetch_terminal_groups(token):
+    url = "https://api-ru.iiko.services/api/1/terminal_groups"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"organizationIds": [IIKO_ORG_ID]}
 
-    return message
+    r = requests.post(url, json=payload, headers=headers)
+    r.raise_for_status()
+    data = r.json()
 
-async def send_telegram_message(text: str):
-    chat_ids = await get_all_chat_ids()
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    for chat_id in chat_ids:
-        payload = {
-            "chat_id": chat_id,
-            "text": text
-        }
-        try:
-            response = httpx.post(url, json=payload)
-            response.raise_for_status()
-            print(f"✅ Сообщение успешно отправлено chat_id={chat_id}")
-        except Exception as e:
-            print(f"❌ Ошибка при отправке в Telegram (chat_id={chat_id}): {e}")
+    return [g["id"] for g in data["terminalGroups"][0]["items"]]
 
+
+def fetch_stoplist_raw(token, terminal_group_ids):
+    url = "https://api-ru.iiko.services/api/1/stop_lists"
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = {"organizationIds": [IIKO_ORG_ID], "terminalGroupIds": terminal_group_ids}
+
+    r = requests.post(url, json=payload, headers=headers)
+    if r.status_code != 200:
+        return []
+
+    try:
+        data = r.json()
+        return data["terminalGroupStopLists"][0]["items"][0]["items"]
+    except:
+        return []
+
+
+async def map_names(items):
+    conn = await db()
+
+    product_ids = [i["productId"] for i in items]
+    rows = await conn.fetch("""
+        SELECT id, name FROM nomenclature WHERE id = ANY($1)
+    """, product_ids)
+    await conn.close()
+
+    id2name = {str(r["id"]): r["name"] for r in rows}
+
+    for item in items:
+        item["name"] = id2name.get(item["productId"], "[НЕ НАЙДЕНО]")
+        item["sku"] = item["productId"]  # создаём SKU как productId
+
+    return items
+
+
+# ====================== ИСТОРИЯ ======================
+
+async def update_history(old_state, new_state):
+    conn = await db()
+
+    old_zero = {sku for sku, v in old_state.items() if v["balance"] == 0}
+    new_zero = {sku for sku, v in new_state.items() if v["balance"] == 0}
+
+    # вошли в стоп
+    for sku in new_zero - old_zero:
+        item = new_state[sku]
+        await conn.execute("""
+            INSERT INTO stoplist_history (sku, name, started_at, date)
+            VALUES ($1, $2, NOW(), CURRENT_DATE)
+        """, sku, item["name"])
+
+    # вышли из стопа
+    for sku in old_zero - new_zero:
+        await conn.execute("""
+            UPDATE stoplist_history
+            SET ended_at = NOW(),
+                duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
+            WHERE sku=$1 AND ended_at IS NULL
+        """, sku)
+
+    await conn.close()
+
+
+# ====================== DIFF ======================
 
 def format_name(item):
-    if "balance" in item and item["balance"] > 0:
+    if item["balance"] > 0:
         return f"{item['name']} ({int(item['balance'])})"
-    return item["name"]
+    return f"{item['name']} — стоп"
 
+
+def format_stoplist_message(added, removed, existing):
+    msg = "Новые блюда в стоп-листе 🚫"
+    msg += "\n" + "\n".join("▫️ " + format_name(i) for i in added) if added else "\n▫️ —"
+
+    msg += "\n\nУдалены из стоп-листа ✅"
+    msg += "\n" + "\n".join("▫️ " + i["name"] for i in removed) if removed else "\n▫️ —"
+
+    msg += "\n\nОстались в стоп-листе"
+    msg += "\n" + "\n".join("▫️ " + format_name(i) for i in existing) if existing else "\n▫️ —"
+
+    return msg + "\n\n#стоплист"
+
+
+async def sync_and_diff(stop_items):
+    conn = await db()
+
+    rows = await conn.fetch("SELECT sku, balance, name FROM active_stoplist")
+    old = {r["sku"]: {"balance": r["balance"], "name": r["name"]} for r in rows}
+
+    new = {i["sku"]: {"balance": i["balance"], "name": i["name"]} for i in stop_items}
+
+    added = [dict(sku=sku, **new[sku]) for sku in new if sku not in old]
+    removed = [dict(sku=sku, **old[sku]) for sku in old if sku not in new]
+    existing = [dict(sku=sku, **new[sku]) for sku in new if sku in old]
+
+    await update_history(old, new)
+
+    await conn.execute("DELETE FROM active_stoplist")
+    for sku, data in new.items():
+        await conn.execute("""
+            INSERT INTO active_stoplist (sku, balance, name)
+            VALUES ($1, $2, $3)
+        """, sku, data["balance"], data["name"])
+
+    await conn.close()
+
+    return added, removed, existing
+
+
+# ====================== TELEGRAM ======================
+
+async def update_stoplist_message(text):
+    chat_ids = await get_all_chat_ids()
+    if not chat_ids:
+        return
+
+    conn = await db()
+
+    for chat_id in chat_ids:
+        row = await conn.fetchrow("SELECT message_id FROM stoplist_message WHERE chat_id=$1", chat_id)
+
+        if row:
+            try:
+                httpx.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": row["message_id"]}
+                )
+            except:
+                pass
+
+        r = httpx.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text}
+        )
+
+        msg_id = r.json()["result"]["message_id"]
+
+        await conn.execute("""
+            INSERT INTO stoplist_message (chat_id, message_id)
+            VALUES ($1, $2)
+            ON CONFLICT (chat_id) DO UPDATE SET message_id = EXCLUDED.message_id
+        """, chat_id, msg_id)
+
+    await conn.close()
+
+
+# ====================== MAIN ======================
 
 async def main():
+    await init_tables()
+
     token = await fetch_token()
     if not token:
-        print("❌ Токен не найден.")
+        print("❌ Нет токена iiko")
         return
 
-    print(f"✅ Актуальный токен: {token}")
-    terminal_group_ids = fetch_terminal_groups(token)
-    stoplist_items = fetch_stop_list_raw(token, terminal_group_ids)
+    tg_ids = fetch_terminal_groups(token)
+    raw = fetch_stoplist_raw(token, tg_ids)
+    raw = await map_names(raw)
 
-    # 🧾 Сопоставим с БД и выведем в консоль
-    mapped = await map_stoplist_with_db(DB_CONFIG, stoplist_items)
-    print("\n🧾 Сопоставленные стоп-позиции:")
-    for line in mapped:
-        print("•", line)
+    added, removed, existing = await sync_and_diff(raw)
 
-    # 📥 Получаем текущее состояние до обновления
-    conn = await asyncpg.connect(**DB_CONFIG)
-    current_rows = await conn.fetch("SELECT sku, name FROM active_stoplist;")
-    await conn.close()
-    current_skus = {row["sku"]: row["name"] for row in current_rows}
-    incoming_skus = {item["sku"]: item["name"] for item in stoplist_items}
-
-
-
-    added_items = []
-    removed_items = []
-    existing_items = []
-
-    for sku, name in incoming_skus.items():
-        item = next(i for i in stoplist_items if i["sku"] == sku)
-        if sku not in current_skus:
-            added_items.append(item)
-        else:
-            existing_items.append(item)
-
-    for sku, name in current_skus.items():
-        if sku not in incoming_skus:
-            removed_items.append({"sku": sku, "name": name})
-
-    # 💾 Обновим таблицу
-    await sync_stoplist_with_db(stoplist_items)
-
-    # 🛑 Не отправлять ничего, если нет изменений
-    if not added_items and not removed_items:
-        print("ℹ️ Нет изменений в стоп-листе, сообщение не отправляется.")
+    if not added and not removed:
+        print("ℹ️ Нет изменений")
         return
 
-    # 📤 Отправим сообщение
-    msg = format_stoplist_message(added_items, removed_items, existing_items)
-    await send_telegram_message(msg)
+    text = format_stoplist_message(added, removed, existing)
+    await update_stoplist_message(text)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-
