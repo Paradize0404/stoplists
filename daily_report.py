@@ -4,6 +4,7 @@ import asyncpg
 import httpx
 from datetime import datetime, date
 from dotenv import load_dotenv
+from datetime import timedelta
 
 load_dotenv()
 
@@ -41,23 +42,39 @@ def format_duration(seconds: int) -> str:
 async def fetch_daily_stats():
     conn = await db()
 
-    rows = await conn.fetch("""
-        SELECT sku, name, SUM(duration_seconds) AS total_sec
-        FROM stoplist_history
-        WHERE date = CURRENT_DATE
-          AND duration_seconds IS NOT NULL
-        GROUP BY sku, name
-        ORDER BY total_sec DESC
-    """)
+    # Сегодняшняя дата в UTC
+    today = datetime.utcnow().date()
 
-    # закрываем «висящие» стопы, если день закончился
-    await conn.execute("""
-        UPDATE stoplist_history
-        SET ended_at = NOW(),
-            duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
-        WHERE date = CURRENT_DATE
-          AND ended_at IS NULL
-    """)
+    # формируем диапазон 06:00–19:00 UTC
+    day_start = datetime(today.year, today.month, today.day, 6, 0)
+    day_end   = datetime(today.year, today.month, today.day, 19, 0)
+
+    rows = await conn.fetch("""
+        SELECT
+            sku,
+            name,
+            SUM(
+                CASE
+                    WHEN ended_at IS NULL THEN
+                        EXTRACT(EPOCH FROM (LEAST($2, NOW()) - GREATEST(started_at, $1)))
+                    ELSE
+                        EXTRACT(EPOCH FROM (LEAST(ended_at, $2) - GREATEST(started_at, $1)))
+                END
+            ) AS total_sec
+        FROM stoplist_history
+        WHERE started_at < $2
+          AND (ended_at IS NULL OR ended_at > $1)
+        GROUP BY sku, name
+        HAVING SUM(
+                CASE
+                    WHEN ended_at IS NULL THEN
+                        EXTRACT(EPOCH FROM (LEAST($2, NOW()) - GREATEST(started_at, $1)))
+                    ELSE
+                        EXTRACT(EPOCH FROM (LEAST(ended_at, $2) - GREATEST(started_at, $1)))
+                END
+            ) > 0
+        ORDER BY total_sec DESC;
+    """, day_start, day_end)
 
     await conn.close()
     return rows
