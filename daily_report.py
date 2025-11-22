@@ -2,10 +2,13 @@ import os
 import asyncio
 import asyncpg
 import httpx
-from datetime import datetime, date
+from datetime import datetime, timedelta, date, time
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
+
+KLG = ZoneInfo("Europe/Kaliningrad")
 
 DB_CONFIG = {
     "user": os.getenv("PGUSER"),
@@ -17,11 +20,9 @@ DB_CONFIG = {
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# сюда впишешь Telegram ID, кому нужен отчёт в конце дня
+# сюда впишешь Telegram ID, кому нужен отчёт
 REPORT_RECIPIENTS = [
     1877127405,
-    1059714785,
-    1078562089
 ]
 
 
@@ -30,7 +31,6 @@ async def db():
 
 
 def format_duration(seconds: int) -> str:
-    """Перевод секунд в формат ЧЧ:ММ."""
     if seconds <= 0:
         return "00:00"
     hours = seconds // 3600
@@ -39,53 +39,78 @@ def format_duration(seconds: int) -> str:
 
 
 async def fetch_daily_stats():
+
+    # вчера в Кёнигсберге
+    now_klg = datetime.now(KLG)
+    target_day = (now_klg - timedelta(days=1)).date()
+
+    day_start = datetime.combine(target_day, time(8, 0), tzinfo=KLG)
+    day_end   = datetime.combine(target_day, time(21, 0), tzinfo=KLG)
+
     conn = await db()
 
+    # тянем ВСЕ записи, которые пересекли период
     rows = await conn.fetch("""
-        SELECT sku, name, SUM(duration_seconds) AS total_sec
+        SELECT
+            sku,
+            name,
+            started_at,
+            ended_at
         FROM stoplist_history
-        WHERE date = CURRENT_DATE
-          AND duration_seconds IS NOT NULL
-        GROUP BY sku, name
-        ORDER BY total_sec DESC
-    """)
-
-    # закрываем «висящие» стопы, если день закончился
-    await conn.execute("""
-        UPDATE stoplist_history
-        SET ended_at = NOW(),
-            duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
-        WHERE date = CURRENT_DATE
-          AND ended_at IS NULL
-    """)
+        WHERE started_at <= $2
+          AND (ended_at IS NULL OR ended_at >= $1)
+    """, day_start, day_end)
 
     await conn.close()
-    return rows
 
-
-def build_report(rows):
-    today = date.today().strftime("%d.%m.%Y")
-    msg = f"📊 Отчёт по стоп-листу за {today}\n\n"
-
-    if not rows:
-        msg += "Сегодня не было стопов."
-        return msg
+    # считаем длительность в рамках окна
+    stats = {}
 
     for row in rows:
         sku = row["sku"]
         name = row["name"]
-        sec = int(row["total_sec"])
 
-        msg += f"▫️ {name} — {format_duration(sec)}\n"
+        s = row["started_at"].astimezone(KLG)
+        e = row["ended_at"]
+        if e:
+            e = e.astimezone(KLG)
+        else:
+            # стоп продолжается — обрезаем по day_end
+            e = now_klg
+            if e > day_end:
+                e = day_end
+
+        # пересечение с окном
+        seg_start = max(s, day_start)
+        seg_end   = min(e, day_end)
+
+        duration = (seg_end - seg_start).total_seconds()
+
+        if duration > 0:
+            stats.setdefault(sku, {"name": name, "sec": 0})
+            stats[sku]["sec"] += duration
+
+    return stats
+
+
+def build_report(stats):
+    target_day = (datetime.now(KLG) - timedelta(days=1)).strftime("%d.%m.%Y")
+    msg = f"📊 Отчёт по стоп-листу за {target_day}\n\n"
+
+    if not stats:
+        msg += "Не было стопов в этот период."
+        return msg
+
+    # сортировка по времени
+    items = sorted(stats.items(), key=lambda x: x[1]["sec"], reverse=True)
+
+    for sku, data in items:
+        msg += f"▫️ {data['name']} — {format_duration(int(data['sec']))}\n"
 
     return msg
 
 
 async def send_report(text):
-    if not REPORT_RECIPIENTS:
-        print("⚠️ REPORT_RECIPIENTS пуст — отчёт некому отправлять.")
-        return
-
     for chat_id in REPORT_RECIPIENTS:
         try:
             httpx.post(
@@ -97,15 +122,14 @@ async def send_report(text):
             print(f"Ошибка отправки отчёта {chat_id}: {e}")
 
 
-async def main():
-    rows = await fetch_daily_stats()
-    report = build_report(rows)
+async def send_daily_report():
+    stats = await fetch_daily_stats()
+    report = build_report(stats)
     await send_report(report)
 
-async def send_daily_report():
-    rows = await fetch_daily_stats()
-    report = build_report(rows)
-    await send_report(report)
+
+async def main():
+    await send_daily_report()
 
 
 if __name__ == "__main__":
