@@ -230,7 +230,14 @@ async def update_stoplist_message(text):
             json={"chat_id": chat_id, "text": text}
         )
 
-        msg_id = r.json()["result"]["message_id"]
+        data = r.json()
+
+        # Если бот НЕ может отправить сообщение (403, 400, invalid chat, block и т.д.)
+        if not data.get("ok"):
+            logging.error(f"Ошибка Telegram при отправке в chat_id={chat_id}: {data}")
+            continue
+
+        msg_id = data["result"]["message_id"]
 
         await conn.execute("""
             INSERT INTO stoplist_message (chat_id, message_id)
