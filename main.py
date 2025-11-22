@@ -186,9 +186,28 @@ async def sync_and_diff(stop_items):
 
     new = {i["sku"]: {"balance": i["balance"], "name": i["name"]} for i in stop_items}
 
-    added = [dict(sku=sku, **new[sku]) for sku in new if sku not in old]
-    removed = [dict(sku=sku, **old[sku]) for sku in old if sku not in new]
-    existing = [dict(sku=sku, **new[sku]) for sku in new if sku in old]
+    # Изменение: учитываем не только появление/удаление, но и изменение баланса
+    added = []
+    removed = []
+    existing = []
+
+    for sku in new:
+        if sku not in old:
+            # новое блюдо в стопе
+            added.append(dict(sku=sku, **new[sku]))
+        else:
+            # блюдо было — проверяем изменение баланса
+            old_balance = float(old[sku]["balance"])
+            new_balance = float(new[sku]["balance"])
+
+            if old_balance != new_balance:
+                added.append(dict(sku=sku, **new[sku]))  # считаем как "добавленное изменение"
+            else:
+                existing.append(dict(sku=sku, **new[sku]))
+
+    for sku in old:
+        if sku not in new:
+            removed.append(dict(sku=sku, **old[sku]))
 
     await update_history(old, new)
 
