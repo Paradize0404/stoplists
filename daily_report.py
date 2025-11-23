@@ -5,6 +5,7 @@ import httpx
 from datetime import datetime, date
 from dotenv import load_dotenv
 from datetime import timedelta
+import logging
 
 load_dotenv()
 
@@ -100,18 +101,19 @@ def build_report(rows):
 
 async def send_report(text):
     if not REPORT_RECIPIENTS:
-        print("⚠️ REPORT_RECIPIENTS пуст — отчёт некому отправлять.")
+        logging.warning("⚠️ REPORT_RECIPIENTS пуст — отчёт некому отправлять.")
         return
 
-    for chat_id in REPORT_RECIPIENTS:
-        try:
-            httpx.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": text}
-            )
-            print(f"Отчёт отправлен → {chat_id}")
-        except Exception as e:
-            print(f"Ошибка отправки отчёта {chat_id}: {e}")
+    async with httpx.AsyncClient() as client:
+        for chat_id in REPORT_RECIPIENTS:
+            try:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": text}
+                )
+                logging.info(f"✅ Отчёт отправлен → {chat_id}")
+            except Exception as e:
+                logging.error(f"❌ Ошибка отправки отчёта {chat_id}: {e}")
 
 
 async def main():
@@ -120,8 +122,10 @@ async def main():
     await send_report(report)
 
 async def send_daily_report():
+    logging.info("📊 Начинаю формирование ежедневного отчёта...")
     rows = await fetch_daily_stats()
     report = build_report(rows)
+    logging.info(f"📝 Отчёт сформирован: {len(rows)} позиций")
     await send_report(report)
 
 

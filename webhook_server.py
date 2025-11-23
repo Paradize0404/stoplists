@@ -2,8 +2,11 @@
 import json
 from fastapi import FastAPI, Request
 import asyncio
-from main import main  # Импортируем основную функцию
+import threading
+from main import main, run_daily_scheduler  # Импортируем основную функцию и планировщик
 from daily_report import main as send_daily_report
+import logging
+
 app = FastAPI()
 
 @app.get("/")
@@ -12,8 +15,15 @@ def index():
 
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 Startup: отправляю ежедневный отчёт (тестовый запуск после деплоя)")
-    asyncio.create_task(send_daily_report())
+    logging.info("🚀 Startup: отправляю ежедневный отчёт (тестовый запуск после деплоя)")
+    try:
+        await send_daily_report()
+    except Exception as e:
+        logging.error(f"Ошибка при отправке отчёта на деплое: {e}")
+    
+    # Запускаем фоновый планировщик для ежедневных отчётов
+    logging.info("📅 Запускаю фоновый планировщик ежедневных отчётов...")
+    threading.Thread(target=run_daily_scheduler, daemon=True).start()
 
 
 @app.post("/webhook")

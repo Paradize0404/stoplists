@@ -118,8 +118,12 @@ def fetch_stoplist_raw(token, terminal_group_ids):
 
 def run_daily_scheduler():
     """Фоновый бесконечный цикл, который ждёт 22:00 Калининграда и шлёт отчёт."""
+    from zoneinfo import ZoneInfo
+    
     while True:
-        now = datetime.now()
+        # Получаем текущее время в часовом поясе Калининграда
+        kaliningrad_tz = ZoneInfo("Europe/Kaliningrad")
+        now = datetime.now(kaliningrad_tz)
 
         # Следующая отправка: сегодня в 22:00 или завтра в 22:00
         target = now.replace(hour=22, minute=0, second=0, microsecond=0)
@@ -127,13 +131,13 @@ def run_daily_scheduler():
             target += timedelta(days=1)
 
         wait_seconds = (target - now).total_seconds()
-        logging.info(f"⏳ Жду до следующей отправки отчёта: {wait_seconds} сек")
+        logging.info(f"⏳ Жду до следующей отправки отчёта: {wait_seconds:.0f} сек (до {target.strftime('%d.%m.%Y %H:%M')})")
 
         time.sleep(wait_seconds)
 
         try:
             logging.info("📤 Авто-отправка вечернего отчёта...")
-            send_daily_report()
+            asyncio.run(send_daily_report())
         except Exception as e:
             logging.error(f"Ошибка при авто-отправке отчёта: {e}")
 
@@ -316,20 +320,6 @@ async def main():
 
     text = format_stoplist_message(added, removed, existing)
     await update_stoplist_message(text)
-
-# -------------------------
-#   ДОБАВЬ внизу, перед uvicorn.run()
-# -------------------------
-
-# 1. Отправка отчёта при деплое (проверка)
-try:
-    logging.info("🚀 Отправляю тестовый отчёт при деплое...")
-    asyncio.run(send_daily_report())
-except Exception as e:
-    logging.error(f"Ошибка при отправке отчёта на деплое: {e}")
-
-# 2. Запуск фонового планировщика
-threading.Thread(target=run_daily_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":
